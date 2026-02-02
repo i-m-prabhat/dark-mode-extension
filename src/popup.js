@@ -11,7 +11,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const url = new URL(tab.url);
   const domain = url.hostname;
   
-  const KEY_ENABLED = `darkMode_enabled_${tab.id}`;
+  const KEY_ENABLED = `darkMode_enabled_${domain}`;
   const KEY_THEME = `darkMode_theme`; 
   const KEY_CUSTOM_BG = `darkMode_bg_${domain}`;
   const KEY_CUSTOM_TEXT = `darkMode_text_${domain}`;
