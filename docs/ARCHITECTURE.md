@@ -4,16 +4,42 @@ This document provides a deep dive into the technical implementation of the Forc
 
 ## System Overview
 
-The extension uses a standard Chrome Extension MV3 (Manifest V3) architecture. It relies on the interaction between three main contexts:
+The extension uses a standard Chrome Extension MV3 (Manifest V3) architecture. The codebase is organized into a modular `src/` directory structure for maintainability.
 
-1.  **Popup Context**: The UI presented to the user.
-2.  **Background Context**: The service worker that acts as a bridge.
-3.  **Content Context**: The script running inside the user's web page.
+### Directory Structure
 
-## Data Flow
+```text
+root/
+├── src/
+│   ├── assets/       # Static assets (images, fonts)
+│   ├── background/   # Service worker script
+│   ├── content/      # Content scripts (page injection)
+│   ├── popup/        # UI logic and HTML
+│   └── icons/        # Extension icons
+└── manifest.json     # Configuration
+```
 
-When the user clicks the toggle button, the following sequence occurs:
+## Data Flow & Persistence
 
+One of the key features is **Domain-Based Persistence**. Settings are saved based on the website's hostname (e.g., `google.com`), ensuring that if a user enables Dark Mode on one tab, it applies to all tabs for that site and persists across reloads.
+
+### Initialization (Page Load)
+```mermaid
+sequenceDiagram
+    participant DOM as Web Page
+    participant Content as content.js
+    participant Storage as chrome.storage.local
+
+    DOM->>Content: Page Load / DOMContentLoaded
+    Content->>Storage: Get settings for current domain
+    Storage-->>Content: Return {enabled, bg, text}
+    
+    opt if enabled == true
+        Content->>DOM: Inject Style Block
+    end
+```
+
+### Runtime Updates (User Interaction)
 ```mermaid
 sequenceDiagram
     participant User
@@ -21,55 +47,48 @@ sequenceDiagram
     participant Storage as chrome.storage.local
     participant Background as background.js
     participant Content as content.js
-    participant DOM as Web Page
 
-    User->>Popup: Click Toggle Button
-    Popup->>Storage: Read current state (enabled/disabled)
-    Popup->>Popup: Calculate new state (!oldState)
-    Popup->>Storage: Save new state
-    Popup->>Background: Send Message {type: "TOGGLE_DARK_MODE", enabled: bool, tabId: 123}
-    Background->>Content: Forward Message to specific tab (123)
-    
-    alt isEnabled == true
-        Content->>DOM: Inject <style id="forced-dark-mode">
-    else isEnabled == false
-        Content->>DOM: Remove <style id="forced-dark-mode">
-    end
+    User->>Popup: Clicks "Enable" or Changes Color
+    Popup->>Storage: Save settings (Key: darkMode_enabled_domain)
+    Popup->>Background: Send Message {type: "UPDATE_SETTINGS", ...}
+    Background->>Content: Forward Message to Active Tab
+    Content->>DOM: Update Style Block Real-time
 ```
 
 ## Component Details
 
-### 1. Popup (`popup.js` & `popup.html`)
--   **Responsibility**: User Interface and State Persistence.
--   **State Management**: Uses `chrome.storage.local` to persist the toggle state *per tab*.
-    -   Key Format: `darkMode_{tabId}`
-    -   Value: `boolean`
+### 1. Popup (`src/popup/`)
+-   **Files**: `popup.html`, `popup.js`
+-   **Responsibility**: User Interface for configuration.
+-   **Features**:
+    -   **Theme Cards**: Pre-defined color sets (Classic, Midnight, OLED).
+    -   **Color Pickers**: Custom input for Background and Text colors.
+    -   **Palette Swatches**: Quick selection of popular colors.
 -   **Logic**:
-    -   On `DOMContentLoaded`: Queries the active tab, generates the storage key, and retrieves the saved state to update the button text.
-    -   On `click`: Toggles the state, updates storage, and sends a message to the background script.
+    -   Derives the current `domain` from the active tab.
+    -   Reads/Writes to `chrome.storage.local` using domain-specific keys: `darkMode_enabled_google.com`.
 
-### 2. Background Service Worker (`background.js`)
--   **Responsibility**: Message Routing.
--   **Why is it needed?**
-    -   In MV3, direct communication between Popup and Content script is possible but routing via Background is a robust pattern for decoupling, especially if we later add context menu toggles or keyboard shortcuts.
--   **Logic**: Listens for `TOGGLE_DARK_MODE` and calls `chrome.tabs.sendMessage` to the `tabId` specified in the payload.
+### 2. Background Service Worker (`src/background/`)
+-   **File**: `background.js`
+-   **Responsibility**: Event coordination and Message Routing.
+-   **Robustness**: Includes error handling for connection issues (e.g., trying to send messages to restricted `chrome://` pages).
 
-### 3. Content Script (`content.js`)
--   **Responsibility**: DOM Manipulation.
--   **Isolation**: Runs in an isolated world, meaning it cannot access the page's window variables but can modify the DOM.
+### 3. Content Script (`src/content/`)
+-   **File**: `content.js`
+-   **Responsibility**: Applying the visual changes.
+-   **Persistence**: Contains an `init()` function that runs immediately on load to check if Dark Mode should be enabled.
 -   **CSS Strategy**:
-    -   Uses `!important` to override existing styles.
-    -   Sets `html` background to `#1e1e1e` (Dark Gray).
-    -   Sets `color` (Text) to `#e0e0e0` (Light Gray).
-    -   Forces all other elements to have `background-color: transparent` to let the dark body background show through, or overrides them with dark borders.
+    -   Injects a `<style id="forced-dark-mode-style">` block.
+    -   Uses `!important` to force overrides.
+    -   Applies the user-selected `bg` and `text` colors dynamically.
 
-## Permissions Explained
+## Permissions
 
--   **`storage`**: Required to remember if the user turned dark mode on/off for a specific tab so the popup button reflects reality when re-opened.
--   **`activeTab`**: Grants temporary access to the currently active tab when the user invokes the extension (clicks the icon). This allows us to send messages to that tab without requesting the scary "Read and change all your data on all websites" permission for everything.
--   **`scripting`**: (Technically unused in the current message-based version, but often required for `executeScript` if we switched strategies. Kept for future-proofing or removal if optimization is needed).
+-   **`storage`**: Essential for saving user preferences per domain.
+-   **`activeTab`**: Allows the popup to interact with the current page without requiring broad host permissions.
+-   **`scripting`**: Reserved for future capabilities (e.g., programmatic script injection), though currently we use Manifest injections.
 
 ## Future Improvements
--   **Global Toggle**: Add a switch to enable dark mode for *all* sites by default.
--   **Custom Colors**: Allow users to pick their own background/text colors via the popup.
--   **Persist Across Reloads**: Currently, the content script does not auto-run on reload unless we add a check in `content.js` to read from storage on initialization.
+-   **Sync Storage**: Migrate from `local` to `sync` storage to share settings across user's devices.
+-   **Global Toggle**: Option to "Enable for All Sites" by default.
+-   **Exclude List**: A blacklist for sites where Dark Mode should never run.
